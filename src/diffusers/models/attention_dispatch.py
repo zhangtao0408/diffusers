@@ -126,7 +126,7 @@ if _CAN_USE_FLEX_ATTN:
 
 
 if _CAN_USE_NPU_ATTN:
-    from torch_npu import npu_fusion_attention
+    from torch_npu import npu_fusion_attention, _npu_flash_attention_unpad
 else:
     npu_fusion_attention = None
 
@@ -1582,7 +1582,7 @@ def _native_flex_attention(
         enable_gqa=enable_gqa,
         return_lse=return_lse,
     )
-    out = out.permute(0, 2, 1, 3)
+    out = out.permute(0, 2, 1, 3).contiguous()
     return out
 
 
@@ -1602,22 +1602,16 @@ def _native_attention(
     return_lse: bool = False,
     _parallel_config: Optional["ParallelConfig"] = None,
 ) -> torch.Tensor:
-    if return_lse:
-        raise ValueError("Native attention backend does not support setting `return_lse=True`.")
-    query, key, value = (x.permute(0, 2, 1, 3) for x in (query, key, value))
-    out = torch.nn.functional.scaled_dot_product_attention(
-        query=query,
-        key=key,
-        value=value,
-        attn_mask=attn_mask,
-        dropout_p=dropout_p,
-        is_causal=is_causal,
-        scale=scale,
-        enable_gqa=enable_gqa,
-    )
-    out = out.permute(0, 2, 1, 3)
-    return out
+    B, S, N, D = query.shape
+    query = query.view(B * S, N * D)
+    key = key.view(B * S, N * D)
+    value = value.view(B * S, N * D)
+    seq_len = torch.full((B,), S, dtype=torch.int32, device='cpu')
+    out = query
+    _npu_flash_attention_unpad(query, key, value, seq_len, 1/math.sqrt(D), N, N, out)
 
+    out = out.view(B, S, N, D).contiguous()
+    return out
 
 @_AttentionBackendRegistry.register(
     AttentionBackendName._NATIVE_CUDNN,
