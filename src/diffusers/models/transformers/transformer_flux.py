@@ -576,6 +576,8 @@ class FluxTransformerBlock(nn.Module):
         self.norm2_context = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff_context = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
 
+        self.double_stream = bool(int(os.environ.get("DOUBLE_STREAM", 1)))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -586,18 +588,46 @@ class FluxTransformerBlock(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
 
-        norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
-            encoder_hidden_states, emb=temb
-        )
         joint_attention_kwargs = joint_attention_kwargs or {}
 
-        # Attention.
-        attention_outputs = self.attn(
-            hidden_states=norm_hidden_states,
-            encoder_hidden_states=norm_encoder_hidden_states,
-            image_rotary_emb=image_rotary_emb,
-            **joint_attention_kwargs,
-        )
+        if self.double_stream:
+            global current_stream
+            global current_event
+            global stream2
+            global event2
+            current_event.record(current_stream)
+            with torch.npu.stream(stream2):
+                stream2.wait_event(current_event)
+                norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
+                    encoder_hidden_states, emb=temb
+                )
+                event2.record(stream2)
+
+            pre_query = self.attn.to_q(norm_hidden_states)
+            pre_key = self.attn.to_k(norm_hidden_states)
+            current_stream.wait_event(event2)
+            
+
+            attention_outputs = self.attn(
+                hidden_states=norm_hidden_states,
+                encoder_hidden_states=norm_encoder_hidden_states,
+                image_rotary_emb=image_rotary_emb,
+                pre_query=pre_query,
+                pre_key=pre_key,
+                cal_q=False,
+                **joint_attention_kwargs,
+            )
+        else:
+            norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
+                encoder_hidden_states, emb=temb
+            )
+            # Attention.
+            attention_outputs = self.attn(
+                hidden_states=norm_hidden_states,
+                encoder_hidden_states=norm_encoder_hidden_states,
+                image_rotary_emb=image_rotary_emb,
+                **joint_attention_kwargs,
+            )
 
         if len(attention_outputs) == 2:
             attn_output, context_attn_output = attention_outputs
