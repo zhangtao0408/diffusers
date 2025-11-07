@@ -127,6 +127,7 @@ if _CAN_USE_FLEX_ATTN:
 
 if _CAN_USE_NPU_ATTN:
     from torch_npu import npu_fusion_attention, _npu_flash_attention_unpad
+    from mindiesd import attention_forward as mindie_sd_attn_forward
 else:
     npu_fusion_attention = None
 
@@ -1586,6 +1587,33 @@ def _native_flex_attention(
     return out
 
 
+# @_AttentionBackendRegistry.register(
+#     AttentionBackendName.NATIVE,
+#     constraints=[_check_device, _check_shape],
+# )
+# def _native_attention(
+#     query: torch.Tensor,
+#     key: torch.Tensor,
+#     value: torch.Tensor,
+#     attn_mask: Optional[torch.Tensor] = None,
+#     dropout_p: float = 0.0,
+#     is_causal: bool = False,
+#     scale: Optional[float] = None,
+#     enable_gqa: bool = False,
+#     return_lse: bool = False,
+#     _parallel_config: Optional["ParallelConfig"] = None,
+# ) -> torch.Tensor:
+#     B, S, N, D = query.shape
+#     query = query.view(B * S, N * D)
+#     key = key.view(B * S, N * D)
+#     value = value.view(B * S, N * D)
+#     seq_len = torch.full((B,), S, dtype=torch.int32, device='cpu')
+#     out = query
+#     _npu_flash_attention_unpad(query, key, value, seq_len, 1/math.sqrt(D), N, N, out)
+
+#     out = out.view(B, S, N, D).contiguous()
+#     return out
+
 @_AttentionBackendRegistry.register(
     AttentionBackendName.NATIVE,
     constraints=[_check_device, _check_shape],
@@ -1603,14 +1631,15 @@ def _native_attention(
     _parallel_config: Optional["ParallelConfig"] = None,
 ) -> torch.Tensor:
     B, S, N, D = query.shape
-    query = query.view(B * S, N * D)
-    key = key.view(B * S, N * D)
-    value = value.view(B * S, N * D)
-    seq_len = torch.full((B,), S, dtype=torch.int32, device='cpu')
-    out = query
-    _npu_flash_attention_unpad(query, key, value, seq_len, 1/math.sqrt(D), N, N, out)
-
-    out = out.view(B, S, N, D).contiguous()
+    out = mindie_sd_attn_forward(
+        query,
+        key,
+        value,
+        opt_mode="manual",
+        op_type="ascend_laser_attention",
+        layout="BNSD"
+    )
+    out = out.transpose(1, 2).contiguous()
     return out
 
 @_AttentionBackendRegistry.register(

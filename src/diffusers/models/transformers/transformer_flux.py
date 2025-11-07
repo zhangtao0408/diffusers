@@ -131,7 +131,7 @@ class FluxAttnProcessor:
     ) -> torch.Tensor:
         if hasattr(self._parallel_config, "context_parallel_config") and \
             self._parallel_config.context_parallel_config is not None:
-            return self._context_parallel_forward(
+            return self._context_parallel_forward_la(
                 attn, hidden_states, encoder_hidden_states, attention_mask, image_rotary_emb, pre_query, pre_key, cal_q
             )
 
@@ -191,7 +191,112 @@ class FluxAttnProcessor:
         else:
             return hidden_states
 
-    def _context_parallel_forward(
+    def _context_parallel_forward_la(
+        self,
+        attn: "FluxAttention",
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_rotary_emb: Optional[torch.Tensor] = None,
+        pre_query: Optional[torch.Tensor] = None,
+        pre_key: Optional[torch.Tensor] = None,
+        cal_q=True
+    ) -> torch.Tensor:
+
+        ulysses_mesh = self._parallel_config.context_parallel_config._ulysses_mesh
+        world_size = self._parallel_config.context_parallel_config.ulysses_degree
+        group = ulysses_mesh.get_group()
+
+        value = attn.to_v(hidden_states)
+        value = value.unflatten(-1, (attn.heads, -1))
+        if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+            encoder_value = attn.add_v_proj(encoder_hidden_states)
+            encoder_value = encoder_value.unflatten(-1, (attn.heads, -1))
+            value = torch.cat([encoder_value, value], dim=1)
+
+        B, S_KV_LOCAL, H, D = value.shape
+        H_LOCAL = H // world_size
+        value_all = ulysses_preforward(value, group, world_size, B, S_KV_LOCAL, H, D, H_LOCAL)
+
+        query = attn.to_q(hidden_states)
+        query = query.unflatten(-1, (attn.heads, -1))
+        query = attn.norm_q(query)
+        if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+            encoder_query = attn.add_q_proj(encoder_hidden_states)
+            encoder_query = encoder_query.unflatten(-1, (attn.heads, -1))
+            encoder_query = attn.norm_added_q(encoder_query)
+            query = torch.cat([encoder_query, query], dim=1)
+        if image_rotary_emb is not None:
+            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+        _, S_Q_LOCAL, _, _ = query.shape
+        query_all = ulysses_preforward(query, group, world_size, B, S_Q_LOCAL, H, D, H_LOCAL)
+
+        key = attn.to_k(hidden_states)
+        key = key.unflatten(-1, (attn.heads, -1))
+        key = attn.norm_k(key)
+        if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+            encoder_key = attn.add_k_proj(encoder_hidden_states)
+            encoder_key = encoder_key.unflatten(-1, (attn.heads, -1))
+            encoder_key = attn.norm_added_k(encoder_key)
+            key = torch.cat([encoder_key, key], dim=1)
+        if image_rotary_emb is not None:
+            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+        key_all = ulysses_preforward(key, group, world_size, B, S_KV_LOCAL, H, D, H_LOCAL)
+
+        B, S, N, D = B, world_size * S_KV_LOCAL, H_LOCAL, D
+        value_all = _wait_tensor(value_all)
+        value_all = value_all.reshape(world_size, S_KV_LOCAL, B, H_LOCAL, D).flatten(0, 1).permute(1, 0, 2, 3).contiguous()
+        # value_all = value_all.view(B * S, N * D)
+
+        query_all = _wait_tensor(query_all)
+        query_all = query_all.reshape(world_size, S_Q_LOCAL, B, H_LOCAL, D).flatten(0, 1).permute(1, 0, 2, 3).contiguous()
+        # query_all = query_all.view(B * S, N * D)
+
+        key_all = _wait_tensor(key_all)
+        key_all = key_all.reshape(world_size, S_KV_LOCAL, B, H_LOCAL, D).flatten(0, 1).permute(1, 0, 2, 3).contiguous()
+        # key_all = key_all.view(B * S, N * D)
+        
+        # seq_len = torch.full((B,), S, dtype=torch.int32, device='cpu')
+        # out = query_all
+        # torch_npu._npu_flash_attention_unpad(query_all, key_all, value_all, seq_len, 1/math.sqrt(D), N, N, out)
+
+        # out = out.view(B, S, N, D).contiguous()
+        # out = out.to(query.dtype)
+        # out = out.reshape(B, world_size, S_Q_LOCAL, H_LOCAL, D).permute(1, 3, 0, 2, 4).contiguous()
+
+        out = mindie_sd_attn_forward(
+            query_all,
+            key_all,
+            value_all,
+            opt_mode="manual",
+            op_type="ascend_laser_attention",
+            layout="BNSD"
+        )
+
+        # W, H, B, S, D
+        out = out.reshape(B, H_LOCAL, world_size, S_Q_LOCAL, D).permute(2, 1, 0, 3, 4).contiguous()
+
+        if encoder_hidden_states is not None:
+            out = _all_to_all_single(out, group)
+            hidden_states = out.flatten(0, 1).permute(1, 2, 0, 3).contiguous()
+
+            hidden_states = hidden_states.flatten(2, 3)
+            hidden_states = hidden_states.to(query.dtype)
+            encoder_hidden_states, hidden_states = hidden_states.split_with_sizes(
+                [encoder_hidden_states.shape[1], hidden_states.shape[1] - encoder_hidden_states.shape[1]], dim=1
+            )
+            hidden_states = attn.to_out[0](hidden_states)
+            hidden_states = attn.to_out[1](hidden_states)
+            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+            return hidden_states, encoder_hidden_states
+        else:
+            out = out.flatten()
+            out = funcol.all_to_all_single(out, None, None, group)
+            hidden_states = out.reshape(world_size, H_LOCAL, B, S_Q_LOCAL, D).flatten(0, 1).permute(1, 2, 0, 3)
+            return hidden_states
+
+    def _context_parallel_forward_atb_fa(
         self,
         attn: "FluxAttention",
         hidden_states: torch.Tensor,
