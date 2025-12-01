@@ -89,7 +89,11 @@ def _wait_tensor(tensor):
 def _all_to_all_single(x: torch.Tensor, group) -> torch.Tensor:
     shape = x.shape
     x = x.flatten()
-    x = funcol.all_to_all_single(x, None, None, group)
+    # x = funcol.all_to_all_single(x, None, None, group)
+    x_out = torch.empty_like(x, device="npu")
+    torch.distributed.all_to_all_single(x_out, x, None, None, group)
+    x = x_out
+    
     x = x.reshape(shape)
     x = _wait_tensor(x)
     return x
@@ -106,7 +110,11 @@ def ulysses_preforward(
 ):
     x = x.reshape(B, S_LOCAL, world_size, H_LOCAL, D).permute(2, 1, 0, 3, 4).contiguous()
     x = x.flatten()
-    x = funcol.all_to_all_single(x, None, None, group)
+    # x = funcol.all_to_all_single(x, None, None, group)
+    x_out = torch.empty_like(x, device='npu')
+    torch.distributed.all_to_all_single(x_out, x, None, None, group)
+    x = x_out
+    
     return x
 
 class FluxAttnProcessor:
@@ -292,7 +300,11 @@ class FluxAttnProcessor:
             return hidden_states, encoder_hidden_states
         else:
             out = out.flatten()
-            out = funcol.all_to_all_single(out, None, None, group)
+            # out = funcol.all_to_all_single(out, None, None, group)
+            x_out = torch.empty_like(out, device='npu')
+            torch.distributed.all_to_all_single(x_out, out, None, None, group)
+            out = x_out
+            
             hidden_states = out.reshape(world_size, H_LOCAL, B, S_Q_LOCAL, D).flatten(0, 1).permute(1, 2, 0, 3)
             return hidden_states
 
@@ -385,7 +397,11 @@ class FluxAttnProcessor:
             return hidden_states, encoder_hidden_states
         else:
             out = out.flatten()
-            out = funcol.all_to_all_single(out, None, None, group)
+            # out = funcol.all_to_all_single(out, None, None, group)
+            x_out = torch.empty_like(out, device='npu')
+            torch.distributed.all_to_all_single(x_out, out, None, None, group)
+            out = x_out
+            
             hidden_states = out.reshape(world_size, H_LOCAL, B, S_Q_LOCAL, D).flatten(0, 1).permute(1, 2, 0, 3)
             return hidden_states
 
