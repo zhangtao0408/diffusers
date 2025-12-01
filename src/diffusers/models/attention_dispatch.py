@@ -980,7 +980,13 @@ def _all_to_all_single(x: torch.Tensor, group) -> torch.Tensor:
     # buf25 = torch.ops._c10d_functional.all_to_all_single.default(buf24, [1, 1], [1, 1], '3')
     # ValueError: Tensors must be contiguous
     x = x.flatten()
-    x = funcol.all_to_all_single(x, None, None, group)
+    
+    # verify all_to_all
+    # x = funcol.all_to_all_single(x, None, None, group)
+    x_out = torch.empty_like(x, device='npu')
+    torch.distributed.all_to_all_single(x_out, x, None, None, group)
+    x = x_out
+    
     x = x.reshape(shape)
     x = _wait_tensor(x)
     return x
