@@ -91,7 +91,7 @@ def _all_to_all_single(x: torch.Tensor, group) -> torch.Tensor:
     x = x.flatten()
     # x = funcol.all_to_all_single(x, None, None, group)
     x_out = torch.empty_like(x, device="npu")
-    torch.distributed.all_to_all_single(x_out, x, None, None, group)
+    torch.distributed.all_to_all_single(x_out, x, None, None, group, async_op=True)
     x = x_out
     
     x = x.reshape(shape)
@@ -112,7 +112,7 @@ def ulysses_preforward(
     x = x.flatten()
     # x = funcol.all_to_all_single(x, None, None, group)
     x_out = torch.empty_like(x, device='npu')
-    torch.distributed.all_to_all_single(x_out, x, None, None, group)
+    torch.distributed.all_to_all_single(x_out, x, None, None, group, async_op=True)
     x = x_out
     
     return x
@@ -302,7 +302,7 @@ class FluxAttnProcessor:
             out = out.flatten()
             # out = funcol.all_to_all_single(out, None, None, group)
             x_out = torch.empty_like(out, device='npu')
-            torch.distributed.all_to_all_single(x_out, out, None, None, group)
+            torch.distributed.all_to_all_single(x_out, out, None, None, group, async_op=True)
             out = x_out
             
             hidden_states = out.reshape(world_size, H_LOCAL, B, S_Q_LOCAL, D).flatten(0, 1).permute(1, 2, 0, 3)
@@ -399,7 +399,7 @@ class FluxAttnProcessor:
             out = out.flatten()
             # out = funcol.all_to_all_single(out, None, None, group)
             x_out = torch.empty_like(out, device='npu')
-            torch.distributed.all_to_all_single(x_out, out, None, None, group)
+            torch.distributed.all_to_all_single(x_out, out, None, None, group, async_op=True)
             out = x_out
             
             hidden_states = out.reshape(world_size, H_LOCAL, B, S_Q_LOCAL, D).flatten(0, 1).permute(1, 2, 0, 3)
