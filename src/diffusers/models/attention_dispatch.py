@@ -984,7 +984,7 @@ def _all_to_all_single(x: torch.Tensor, group) -> torch.Tensor:
     # verify all_to_all
     # x = funcol.all_to_all_single(x, None, None, group)
     x_out = torch.empty_like(x, device='npu')
-    torch.distributed.all_to_all_single(x_out, x, None, None, group)
+    torch.distributed.all_to_all_single(x_out, x, None, None, group, async_op=True)
     x = x_out
     
     x = x.reshape(shape)
